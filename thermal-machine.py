@@ -1,17 +1,40 @@
-import socket
-import select
-import argparse
+import socket, select, argparse, pexpect, serial, sys
+from pexpect import fdpexpect
+from time import sleep
 
 parser = argparse.ArgumentParser()
 parser.add_argument("ip_addr", metavar="<10.1.0.3>", help="Targets IP Address")
+parser.add_argument("usbCon", metavar="</dev/ttyUSB*>", help="USB Connection (full path)")
 parser.add_argument("-p", "--power", dest="power", metavar="", help="on, off, status", default=None, choices=['on', 'off'])
 parser.add_argument("-t", "--temp", dest="temp", metavar="", help="set", default=None, choices=['set'])
 parser.add_argument("-s", "--status", dest="status", metavar="", help="check", default=None, choices=['check'])
+parser.add_argument("-d", "--device", dest="device", metavar="", help="horta, dune", default=None, choices=['horta', 'dune', 'dune-socket', 'horta-socket'])
 args = parser.parse_args()
+usbCon = args.usbCon
+device = args.device
 
-if args.temp == "set":
-    temp1 = input("Please enter the new Temperature SetPoint: ")
+fd = serial.Serial(usbCon, 115200, timeout=1) #Connect to the Serial port
+ss = fdpexpect.fdspawn(fd, encoding='utf-8') #Opens the serial port as a child process
+ss.delaybeforesend = 5 #Delays sending commands
 
+def templimit():
+    global limitlow
+    global limithigh
+    if device.lower() == 'dune' or device.lower() == 'dune-socket':
+        if device.lower() == 'dune-socket':
+            limitlow = -30
+            limithigh = 95
+        else:
+            limitlow = -50
+            limithigh = 125
+    elif device.lower() == 'horta' or device.lower() == 'horta-socket':
+        if device.lower() == 'horta-socket':
+            limitlow = -50
+            limithigh = 125
+        else:
+            limitlow = -30
+            limithigh = 95
+    
 class MDSocket:
     def __init__(self,ip_addr,tcp_port,timeout_secs):
         self.s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
@@ -111,7 +134,7 @@ class MDSocket:
     def WriteMI(self,address):
         if self.s is None:
             raise OSError('Socket error;not connected')
-        value = temp1
+        value = str(temp2)
         if len(value) != 4 and len(value) == 3:
             value = value + "0"
         elif len(value) !=4 and len(value) == 2:
@@ -120,7 +143,28 @@ class MDSocket:
             value = "00" + value + "0"
         Command="MI" + address +"," + str(value)
         self.transact(self.baseCommand)
-        print(f"Temperature is set to: {temp1}C")
+        print(f"Temperature is set to: {temp2}C")
+        return self.transact(Command)
+    
+    def WriteMII(self,address):
+        if self.s is None:
+            raise OSError('Socket error;not connected')
+        if int(temp1) >= 85:
+            value = str(limithigh)
+            print(f"Temperature is set to: {value}C")
+        elif int(temp1) <= 0:
+            value = str(limitlow)
+            print(f"Temperature is set to: {value}C")
+        else:
+            value = str(temp2)
+        if len(value) != 4 and len(value) == 3:
+            value = value + "0"
+        elif len(value) !=4 and len(value) == 2:
+            value = "0" + value + "0"
+        elif len(value) !=4 and len(value) == 1:
+            value = "00" + value + "0"
+        Command="MI" + address +"," + str(value)
+        self.transact(self.baseCommand)
         return self.transact(Command)
         
     #Write MB Registar with specified value    
@@ -151,4 +195,53 @@ if __name__ =='__main__':
         print(s.WriteMB("0020",1))
         print("Power turned off")
     if args.temp == "set":
-        print(s.WriteMI("0699"))
+        temp1 = input("Please enter the Junction Temperature SetPoint: ")
+        temp2 = temp1
+        templimit()
+        print(s.WriteMII("0699"))
+        ss.sendline('cd /root/')
+        ss.expect('#', timeout=None)
+        if "dune" in device.lower():
+            ss.sendline('./set_tsense.sh') #Make sure filename matches the one on your system
+            ss.expect('#', timeout=None)
+        i = 0
+        try:
+            while i < 100:
+                ss.sendline('./tsense.sh') #Make sure filename matches the one on your system
+                ss.expect('#', timeout=None)
+                string = str(ss.before)
+                if "panic" in string or "kernel" in string or "Dune" in string or "end" in string or "trace" in string or "CPU" in string:
+                    print("\n--- Kernel Panic ---\n")
+                    sys.exit(0)
+                elif "random: crng init done" not in string:
+                    if 'dune' in device.lower():
+                        string = string.replace("./tsense.sh", "")
+                        string = string.replace("Temperature is ", "")
+                        string = string.replace("C", "")
+                        string = string.replace("\r\n", "")
+                        string = string.replace(" \x1b[6n", "")
+                        print(f"Junction Temperature is {string}C")
+                    elif 'horta' in device.lower():
+                        string = string.replace("./max_tsens.sh", "")
+                        string = string.replace("max temp: ", "")
+                        string = string.replace("C", "")
+                        print(f"Junction Temperature is {string}C")
+                    if int(string) <= (int(temp1) - 3) and int(string) >= (int(temp1) - 10) and int(temp2) < limithigh:
+                        temp2 = int(temp2) + 1
+                        if i > 0:
+                            i -= 1
+                        print(s.WriteMI("0699"))
+                    elif int(string) >= (int(temp1) + 3) and int(string) <= (int(temp1) + 10) and int(temp2) > limitlow:
+                        temp2 = int(temp2) - 1
+                        if i > 0:
+                            i -= 1
+                        print(s.WriteMI("0699"))
+                    elif int(string) == int(temp1) or int(string) == int(temp1) + 2 or int(string) == int(temp1) - 2:
+                        i += 1
+                sleep(1)
+            print("\nTemperature is stable, exiting the software...")
+            ss.close()
+            sys.exit(0)
+        except KeyboardInterrupt:
+            print("\nInterrupted manually.\nClosing...")
+            sys.exit(0)
