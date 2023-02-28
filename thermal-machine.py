@@ -17,7 +17,7 @@ fd = serial.Serial(usbCon, 115200, timeout=1) #Connect to the Serial port
 ss = fdpexpect.fdspawn(fd, encoding='utf-8') #Opens the serial port as a child process
 ss.delaybeforesend = 5 #Delays sending commands
 
-def templimit():
+def tempcheck():
     global limitlow
     global limithigh
     if device.lower() == 'dune' or device.lower() == 'dune-socket':
@@ -197,7 +197,7 @@ if __name__ =='__main__':
     if args.temp == "set":
         temp1 = input("Please enter the Junction Temperature SetPoint: ")
         temp2 = temp1
-        templimit()
+        tempcheck()
         print(s.WriteMII("0699"))
         ss.sendline('cd /root/')
         ss.expect('#', timeout=None)
